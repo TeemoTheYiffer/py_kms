@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from py_kms.core.config import settings
 from py_kms.core.security import create_api_key
-from py_kms.core.database import init_db
+from py_kms.core.database import init_db, get_db
 from py_kms.api.routes import secrets
 
 # Setup logging
@@ -30,18 +30,41 @@ async def startup_event():
     """Initialize services on startup"""
     logger.info("Initializing KMS service")
     try:
-        # Initialize all database tables
-        init_db(settings.DB_PATH)
+        # First ensure database and tables are created
+        await init_db(settings.DB_PATH)
+        logger.info("Database initialized")
         
-        # Generate default API key if none exists
-        api_key, expires_at = create_api_key()
-        logger.info(f"Default API key initialized: {api_key}")
-        logger.info(f"Expires at: {expires_at}")
+        # Get database connection
+        db = await get_db()
+        logger.info("Database connection established")
         
+        # Check if we need to create a default API key
+        async with db.cursor() as cur:
+            await cur.execute("SELECT COUNT(*) FROM api_keys")
+            count = await cur.fetchone()
+            if count[0] == 0:
+                # Generate default API key if none exists
+                api_key, expires_at = await create_api_key()
+                logger.info(f"Default API key initialized: {api_key}")
+                logger.info(f"Expires at: {expires_at}")
+            else:
+                logger.info("API keys already exist, skipping default key creation")
+                
     except Exception as e:
         logger.error(f"Startup error: {e}")
         raise
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    try:
+        db = await get_db()
+        await db.disconnect()
+        logger.info("Database connection closed")
+    except Exception as e:
+        logger.error(f"Shutdown error: {e}")
+
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

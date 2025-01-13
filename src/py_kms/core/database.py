@@ -48,39 +48,36 @@ class AsyncDatabaseManager:
 
 async def init_db(db_path: Path) -> None:
     """Initialize all database tables"""
-    async with aiosqlite.connect(str(db_path)) as db:
-        await db.execute("PRAGMA journal_mode = WAL")
-        await db.execute("PRAGMA foreign_keys = ON")
-        
-        # Create tables
-        await db.execute("""
+    db = AsyncDatabaseManager(db_path)
+    await db.connect()
+    
+    async with db.transaction() as conn:
+        # Create tables in a single transaction
+        await conn.executescript("""
+            PRAGMA journal_mode = WAL;
+            PRAGMA foreign_keys = ON;
+            
             CREATE TABLE IF NOT EXISTS api_keys (
                 key_id TEXT PRIMARY KEY,
                 api_key TEXT UNIQUE NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP NOT NULL,
                 is_active BOOLEAN DEFAULT TRUE
-            )
-        """)
-        
-        await db.execute("""
+            );
+            
             CREATE TABLE IF NOT EXISTS secrets (
                 service_name TEXT PRIMARY KEY,
                 encrypted_data BLOB NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        await db.execute("""
+            );
+            
             CREATE TABLE IF NOT EXISTS master_key (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 key BLOB NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+            );
         """)
-        
-        await db.commit()
 
 # Global database instance
 _db_manager: Optional[AsyncDatabaseManager] = None

@@ -1,15 +1,12 @@
 ﻿from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Form, Query
 from ...core.security import verify_api_key, create_api_key 
-from ...services.kms import KMS
+from ...services.kms import get_kms, AsyncKMS
 from ...core.config import settings
 from ..models.secret import SecretsResponse, ServiceList, APIKeyResponse
 import json
 
 router = APIRouter()
-
-def get_kms():
-    return KMS(settings.DB_PATH)
 
 @router.post(
     "/{service_name}",
@@ -21,9 +18,9 @@ async def store_secret(
     service_name: str,
     secret_data: str = Form(..., description="Secret content"),
     metadata: str = Form(default="{}", description="Optional JSON metadata"),
-    kms: KMS = Depends(get_kms)
+    kms: AsyncKMS = Depends(get_kms)
 ) -> SecretsResponse:
-    """Store an secret for a service"""
+    """Store a secret for a service"""
     try:
         # Parse metadata if provided
         meta_dict = json.loads(metadata)
@@ -31,7 +28,7 @@ async def store_secret(
         # Add timestamp to metadata
         meta_dict["stored_at"] = str(datetime.now())
         
-        kms.store_secret(
+        await kms.store_secret(
             service_name=service_name,
             secret_data=secret_data,
             metadata=meta_dict
@@ -57,21 +54,21 @@ async def store_secret(
 @router.get(
     "/{service_name}",
     response_model=SecretsResponse,
-    summary="Retrieve a secret",
+    summary="Retrieve a secret"
 )
 async def get_secret(
     service_name: str,
-    kms: KMS = Depends(get_kms),
+    kms: AsyncKMS = Depends(get_kms),
     api_key: str = Depends(verify_api_key)
 ) -> SecretsResponse:
     """Retrieve a secret and its metadata"""
     try:
-        secret_info = kms.get_secret(service_name)
+        secret_info = await kms.get_secret(service_name)
         return SecretsResponse(
             service_name=service_name,
             secret=secret_info["secret"].decode(),
             metadata=secret_info["metadata"],
-            created_at=str(datetime.fromisoformat(secret_info["metadata"]["stored_at"]))
+            created_at=secret_info["metadata"]["stored_at"]
         )
     except FileNotFoundError:
         raise HTTPException(
@@ -82,29 +79,29 @@ async def get_secret(
 @router.get(
     "/",
     response_model=ServiceList,
-    summary="List all secret services",
+    summary="List all secret services"
 )
 async def list_secrets(
-    kms: KMS = Depends(get_kms),
+    kms: AsyncKMS = Depends(get_kms),
     api_key: str = Depends(verify_api_key)
 ) -> ServiceList:
-    """List all services that have stored keys"""
-    services = kms.list_services()
+    """List all services that have stored secrets"""
+    services = await kms.list_services()
     return ServiceList(services=services, total_count=len(services))
 
 @router.delete(
     "/{service_name}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete a secret",
+    summary="Delete a secret"
 )
 async def delete_secret(
     service_name: str,
     api_key: str = Depends(verify_api_key),
-    kms: KMS = Depends(get_kms)
+    kms: AsyncKMS = Depends(get_kms)
 ) -> None:
     """Delete a stored secret"""
     try:
-        kms.remove_secret(service_name)
+        await kms.remove_secret(service_name)
     except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -118,11 +115,11 @@ async def delete_secret(
 )
 async def create_new_api_key(
     key_name: str,
-    ttl_days: int = Query(default=30, gt=0, le=365),  # Add TTL parameter
+    ttl_days: int = Query(default=30, gt=0, le=365),
     current_api_key: str = Depends(verify_api_key)
 ) -> APIKeyResponse:
     """Create a new API key with a given name"""
-    new_key = create_api_key(key_name, ttl_days)
+    new_key, created_at = await create_api_key(key_name, ttl_days)
     if not new_key:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

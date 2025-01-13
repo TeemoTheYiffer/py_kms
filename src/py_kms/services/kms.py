@@ -2,72 +2,74 @@ from cryptography.fernet import Fernet
 from datetime import datetime
 import json
 import base64
-import sqlite3
 from pathlib import Path
-from typing import Dict, Union, Optional
-from ..core.database import get_db_connection
+from typing import Dict, Union, Optional, List
 
-class KMS:
-    def __init__(self, db_path: Optional[Union[str, Path]] = None):
-        """
-        Initialize the KMS with a SQLite database.
-        
-        Args:
-            db_path: Path to SQLite database. If None, uses an OS-appropriate default location
-        """
-        if db_path is None:
-            app_dir = Path.home() / ".py_kms"
-            app_dir.mkdir(exist_ok=True)
-            db_path = app_dir / "kms.db"
-        
-        self.db_path = Path(db_path)
-        self._load_or_create_master_key()
+from ..core.database import AsyncDatabaseManager, get_db
 
-    def _load_or_create_master_key(self) -> None:
-        """Load existing master key or create a new one."""
-        with get_db_connection(self.db_path) as conn:
-            master_key = conn.execute("SELECT key FROM master_key WHERE id = 1").fetchone()
+class AsyncKMS:
+    def __init__(self):
+        self._fernet: Optional[Fernet] = None
+    
+    async def initialize(self) -> None:
+        """Initialize the KMS service"""
+        await self._load_or_create_master_key()
+    
+    async def _load_or_create_master_key(self) -> None:
+        """Load existing master key or create a new one"""
+        db = await get_db()
+        async with db.cursor() as cur:
+            await cur.execute("SELECT key FROM master_key WHERE id = 1")
+            result = await cur.fetchone()
             
-            if not master_key:
+            if not result:
                 # Generate and store new master key
                 master_key = Fernet.generate_key()
-                conn.execute("INSERT INTO master_key (id, key) VALUES (1, ?)", (master_key,))
+                async with db.transaction() as conn:
+                    await conn.execute(
+                        "INSERT INTO master_key (id, key) VALUES (1, ?)",
+                        (master_key,)
+                    )
                 self._fernet = Fernet(master_key)
             else:
-                self._fernet = Fernet(master_key[0])
+                self._fernet = Fernet(result[0])
 
-    def store_secret(
+    async def store_secret(
         self, 
         service_name: str, 
         secret_data: Union[str, bytes],
         metadata: Optional[Dict] = None
     ) -> None:
-        """Store a secret with optional metadata."""
+        """Store a secret with optional metadata"""
         if isinstance(secret_data, str):
             secret_data = secret_data.encode()
         
         secret_info = {
             "secret": base64.b64encode(secret_data).decode(),
             "metadata": metadata or {},
-            "created_at": str(datetime.now().isoformat())
+            "created_at": datetime.now().isoformat()
         }
         
         encrypted_data = self._fernet.encrypt(json.dumps(secret_info).encode())
         
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO secrets (service_name, encrypted_data, updated_at)
+        db = await get_db()
+        async with db.transaction() as conn:
+            await conn.execute("""
+                INSERT OR REPLACE INTO secrets 
+                (service_name, encrypted_data, updated_at)
                 VALUES (?, ?, CURRENT_TIMESTAMP)
             """, (service_name, encrypted_data))
 
-    def get_secret(self, service_name: str) -> Dict:
-        """Retrieve a secret and its metadata."""
-        with sqlite3.connect(self.db_path) as conn:
-            result = conn.execute("""
+    async def get_secret(self, service_name: str) -> Dict:
+        """Retrieve a secret and its metadata"""
+        db = await get_db()
+        async with db.cursor() as cur:
+            await cur.execute("""
                 SELECT encrypted_data 
                 FROM secrets 
                 WHERE service_name = ?
-            """, (service_name,)).fetchone()
+            """, (service_name,))
+            result = await cur.fetchone()
             
             if not result:
                 raise FileNotFoundError(f"No secret found for service: {service_name}")
@@ -78,41 +80,32 @@ class KMS:
             
             return secret_info
 
-    def list_services(self) -> list[str]:
-        """List all services that have stored secrets."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT service_name FROM secrets ORDER BY service_name")
-            return [row[0] for row in cursor.fetchall()]
+    async def list_services(self) -> List[str]:
+        """List all services that have stored secrets"""
+        db = await get_db()
+        async with db.cursor() as cur:
+            await cur.execute("SELECT service_name FROM secrets ORDER BY service_name")
+            results = await cur.fetchall()
+            return [row[0] for row in results]
 
-    def remove_secret(self, service_name: str) -> None:
-        """Remove a stored secret."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
+    async def remove_secret(self, service_name: str) -> None:
+        """Remove a stored secret"""
+        db = await get_db()
+        async with db.transaction() as conn:
+            cursor = await conn.execute("""
                 DELETE FROM secrets 
                 WHERE service_name = ?
             """, (service_name,))
-            
             if cursor.rowcount == 0:
                 raise FileNotFoundError(f"No secret found for service: {service_name}")
 
-    def get_secret_info(self, service_name: str) -> Dict:
-        """Get secret metadata without the actual secret content."""
-        with sqlite3.connect(self.db_path) as conn:
-            result = conn.execute("""
-                SELECT encrypted_data, created_at, updated_at 
-                FROM secrets 
-                WHERE service_name = ?
-            """, (service_name,)).fetchone()
-            
-            if not result:
-                raise FileNotFoundError(f"No secret found for service: {service_name}")
-            
-            decrypted_data = self._fernet.decrypt(result[0])
-            secret_info = json.loads(decrypted_data.decode())
-            
-            return {
-                "service_name": service_name,
-                "metadata": secret_info["metadata"],
-                "created_at": result[1],
-                "updated_at": result[2]
-            }
+# Global KMS instance
+_kms_instance: Optional[AsyncKMS] = None
+
+async def get_kms() -> AsyncKMS:
+    """Get the KMS service instance"""
+    global _kms_instance
+    if _kms_instance is None:
+        _kms_instance = AsyncKMS()
+        await _kms_instance.initialize()
+    return _kms_instance
