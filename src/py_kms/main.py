@@ -30,30 +30,36 @@ async def startup_event():
     """Initialize services on startup"""
     logger.info("Initializing KMS service")
     try:
-        # First ensure database and tables are created
+        # Ensure app directory exists
+        settings.APP_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Application directory ensured: {settings.APP_DIR}")
+        
+        # Initialize database and tables
         await init_db(settings.DB_PATH)
-        logger.info("Database initialized")
+        logger.info(f"Database initialized at: {settings.DB_PATH}")
         
         # Get database connection
         db = await get_db()
         logger.info("Database connection established")
         
-        # Check if we need to create a default API key
+        # Check for existing API keys
         async with db.cursor() as cur:
             await cur.execute("SELECT COUNT(*) FROM api_keys")
-            count = await cur.fetchone()
-            if count[0] == 0:
+            result = await cur.fetchone()
+            key_count = result[0] if result else 0
+            
+            if key_count == 0:
                 # Generate default API key if none exists
                 api_key, expires_at = await create_api_key()
                 logger.info(f"Default API key initialized: {api_key}")
                 logger.info(f"Expires at: {expires_at}")
             else:
-                logger.info("API keys already exist, skipping default key creation")
+                logger.info(f"Found {key_count} existing API keys")
                 
     except Exception as e:
         logger.error(f"Startup error: {e}")
         raise
-
+    
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""

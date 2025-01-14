@@ -5,11 +5,14 @@ from pathlib import Path
 
 class AsyncDatabaseManager:
     def __init__(self, db_path: Path):
-        self.db_path = db_path
+        self.db_path = Path(db_path)
         self._db: Optional[aiosqlite.Connection] = None
         
     async def connect(self) -> None:
         """Initialize the database connection"""
+        # Ensure directory exists
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        
         if not self._db:
             self._db = await aiosqlite.connect(str(self.db_path))
             await self._db.execute("PRAGMA journal_mode = WAL")
@@ -48,36 +51,48 @@ class AsyncDatabaseManager:
 
 async def init_db(db_path: Path) -> None:
     """Initialize all database tables"""
-    db = AsyncDatabaseManager(db_path)
-    await db.connect()
+    # Ensure directory exists
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     
-    async with db.transaction() as conn:
-        # Create tables in a single transaction
-        await conn.executescript("""
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
+    async with aiosqlite.connect(str(db_path)) as db:
+        # Enable WAL mode and foreign keys
+        await db.execute("PRAGMA journal_mode = WAL")
+        await db.execute("PRAGMA foreign_keys = ON")
+        
+        # Create tables in a transaction
+        await db.execute("BEGIN")
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    key_id TEXT PRIMARY KEY,
+                    api_key TEXT UNIQUE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE
+                )
+            """)
             
-            CREATE TABLE IF NOT EXISTS api_keys (
-                key_id TEXT PRIMARY KEY,
-                api_key TEXT UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL,
-                is_active BOOLEAN DEFAULT TRUE
-            );
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS secrets (
+                    service_name TEXT PRIMARY KEY,
+                    encrypted_data BLOB NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             
-            CREATE TABLE IF NOT EXISTS secrets (
-                service_name TEXT PRIMARY KEY,
-                encrypted_data BLOB NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS master_key (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    key BLOB NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             
-            CREATE TABLE IF NOT EXISTS master_key (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                key BLOB NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            raise Exception(f"Failed to initialize database: {str(e)}")
 
 # Global database instance
 _db_manager: Optional[AsyncDatabaseManager] = None
